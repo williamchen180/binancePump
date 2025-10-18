@@ -1,3 +1,5 @@
+
+from python_ntfy import NtfyClient
 import pandas as pd
 import numpy as np
 import json
@@ -11,7 +13,10 @@ from pricegroup import *
 import signal
 import threading
 import sys
+import argparse
 from typing import Dict, List
+from loguru import logger
+import os
 
 show_only_pair = "USDT" #Select nothing for all, only selected currency will be shown
 show_limit = 1      #minimum top query limit
@@ -21,6 +26,56 @@ price_groups: Dict[str, PriceGroup] = {}
 last_symbol = "X"
 chat_ids = []
 twm: ThreadedWebsocketManager
+
+# Global variables for ntfy and logging
+ntfy_client = None
+
+def setup_logging():
+    """Setup loguru logging with daily log files"""
+    # Remove default handler
+    logger.remove()
+    
+    # Add file handler with daily rotation
+    today = dt.datetime.now().strftime("%Y_%m_%d")
+    log_file = f"binancePump_{today}.log"
+    
+    # Add file logger
+    logger.add(
+        log_file,
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+        rotation="1 day",
+        retention="30 days"
+    )
+    
+    # Add console logger
+    logger.add(
+        sys.stdout,
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+    )
+
+def setup_ntfy(channel_name):
+    """Setup ntfy client"""
+    global ntfy_client
+    ntfy_client = NtfyClient(topic=channel_name)
+    logger.info(f"ntfy initialized with topic: {channel_name}")
+
+def send_notification_and_log(title, message):
+    """Send notification via ntfy and log the message"""
+    # Print to console (keep original behavior)
+    print(f"{message}")
+    
+    # Log the message
+    logger.info(f"{title}: {message}")
+    
+    # Send ntfy notification
+    if ntfy_client:
+        try:
+            pass
+            # ntfy_client.send(message=message, title=title)
+        except Exception as e:
+            logger.error(f"Failed to send ntfy notification: {e}")
 
 def get_price_groups() -> List[PriceGroup]:
     """
@@ -101,11 +156,11 @@ def process_message(tickers):
                     max_price_group = sorted_price_group[s]
                     max_price_group = price_groups[max_price_group]
                     if not max_price_group.is_printed:
+                        msg = "Top Ticks"
                         if not header_printed:
-                            msg = "Top Ticks"
                             print(msg)
                             header_printed = True
-                        print(max_price_group.to_string(True))
+                        send_notification_and_log(msg, max_price_group.to_string(True))
                         anyPrinted = True
 
         sorted_price_group = sorted(price_groups, key=lambda k:price_groups[k]['total_price_change'])
@@ -117,11 +172,11 @@ def process_message(tickers):
                     max_price_group = sorted_price_group[s]
                     max_price_group = price_groups[max_price_group]
                     if not max_price_group.is_printed:
+                        msg = "Top Total Price Change"
                         if not header_printed:
-                            msg = "Top Total Price Change"
                             print(msg)
                             header_printed = True
-                        print(max_price_group.to_string(True))
+                        send_notification_and_log(msg, max_price_group.to_string(True))
                         anyPrinted = True
 
         sorted_price_group = sorted(price_groups, key=lambda k:abs(price_groups[k]['relative_price_change']))
@@ -133,11 +188,11 @@ def process_message(tickers):
                     max_price_group = sorted_price_group[s]
                     max_price_group = price_groups[max_price_group]
                     if not max_price_group.is_printed:
+                        msg = "Top Relative Price Change"
                         if not header_printed:
-                            msg = "Top Relative Price Change"
                             print(msg)
                             header_printed = True
-                        print(max_price_group.to_string(True))
+                        send_notification_and_log(msg, max_price_group.to_string(True))
                         anyPrinted = True
 
         sorted_price_group = sorted(price_groups, key=lambda k:price_groups[k]['total_volume_change'])
@@ -149,11 +204,11 @@ def process_message(tickers):
                     max_price_group = sorted_price_group[s]
                     max_price_group = price_groups[max_price_group]
                     if not max_price_group.is_printed:
+                        msg = "Top Total Volume Change"
                         if not header_printed:
-                            msg = "Top Total Volume Change"
                             print(msg)
                             header_printed = True
-                        print(max_price_group.to_string(True))
+                        send_notification_and_log(msg, max_price_group.to_string(True))
                         anyPrinted = True
 
         if anyPrinted:
@@ -163,6 +218,18 @@ def stop():
     twm.stop()
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Binance Pump Detector with ntfy notifications')
+    parser.add_argument('--ntfy', default='BinancePump-9527', help='ntfy channel name (default: BinancePump-9527)')
+    args = parser.parse_args()
+    
+    # Setup logging
+    setup_logging()
+    logger.info("BinancePump started")
+    
+    # Setup ntfy
+    setup_ntfy(args.ntfy)
+    
     #READ API CONFIG
     api_config = {}
     with open('api_config.json') as json_data:

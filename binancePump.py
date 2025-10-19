@@ -36,15 +36,15 @@ def setup_logging():
     logger.remove()
     
     # Add file handler with daily rotation
-    today = dt.datetime.now().strftime("%Y_%m_%d")
-    log_file = f"binancePump_{today}.log"
+    # Use dynamic filename pattern that includes date
+    log_file_pattern = "binancePump_{time:YYYY_MM_DD}.log"
     
-    # Add file logger
+    # Add file logger with rotation at midnight
     logger.add(
-        log_file,
+        log_file_pattern,
         level="INFO",
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-        rotation="1 day",
+        rotation="00:00",  # Rotate at midnight
         retention="30 days"
     )
     

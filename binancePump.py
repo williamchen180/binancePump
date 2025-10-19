@@ -17,6 +17,7 @@ import argparse
 from typing import Dict, List
 from loguru import logger
 import os
+import time
 
 show_only_pair = "USDT" #Select nothing for all, only selected currency will be shown
 show_limit = 1      #minimum top query limit
@@ -29,6 +30,8 @@ twm: ThreadedWebsocketManager
 
 # Global variables for ntfy and logging
 ntfy_client = None
+state_file = "binancePump_state.json"
+save_timer = None
 
 def setup_logging():
     """Setup loguru logging with daily log files"""
@@ -60,6 +63,154 @@ def setup_ntfy(channel_name):
     global ntfy_client
     ntfy_client = NtfyClient(topic=channel_name)
     logger.info(f"ntfy initialized with topic: {channel_name}")
+
+def serialize_data():
+    """Serialize current state data to JSON format"""
+    try:
+        # Convert PriceChange objects to dictionaries
+        price_changes_data = []
+        for pc in price_changes:
+            price_changes_data.append({
+                'symbol': pc.symbol,
+                'prev_price': pc.prev_price,
+                'price': pc.price,
+                'total_trades': pc.total_trades,
+                'open_price': pc.open_price,
+                'volume': pc.volume,
+                'is_printed': pc.is_printed,
+                'event_time': pc.event_time.isoformat(),
+                'prev_volume': pc.prev_volume
+            })
+        
+        # Convert PriceGroup objects to dictionaries
+        price_groups_data = {}
+        for symbol, pg in price_groups.items():
+            price_groups_data[symbol] = {
+                'symbol': pg.symbol,
+                'tick_count': pg.tick_count,
+                'total_price_change': pg.total_price_change,
+                'relative_price_change': pg.relative_price_change,
+                'total_volume_change': pg.total_volume_change,
+                'last_price': pg.last_price,
+                'last_event_time': pg.last_event_time.isoformat(),
+                'open_price': pg.open_price,
+                'volume': pg.volume,
+                'is_printed': pg.is_printed
+            }
+        
+        # Create complete state data
+        state_data = {
+            'timestamp': dt.datetime.now().isoformat(),
+            'price_changes': price_changes_data,
+            'price_groups': price_groups_data,
+            'last_symbol': last_symbol,
+            'show_only_pair': show_only_pair,
+            'show_limit': show_limit,
+            'min_perc': min_perc
+        }
+        
+        return state_data
+    except Exception as e:
+        logger.error(f"Failed to serialize data: {e}")
+        return None
+
+def deserialize_data(state_data):
+    """Deserialize state data from JSON format"""
+    global price_changes, price_groups, last_symbol, show_only_pair, show_limit, min_perc
+    
+    try:
+        # Check if data is too old (more than 10 minutes)
+        saved_time = dt.datetime.fromisoformat(state_data['timestamp'])
+        current_time = dt.datetime.now()
+        if (current_time - saved_time).total_seconds() > 600:  # 10 minutes
+            logger.info("Saved data is too old (>10 minutes), discarding")
+            return False
+        
+        # Restore price_changes
+        price_changes.clear()
+        for pc_data in state_data['price_changes']:
+            pc = PriceChange(
+                symbol=pc_data['symbol'],
+                prev_price=pc_data['prev_price'],
+                price=pc_data['price'],
+                total_trades=pc_data['total_trades'],
+                open_price=pc_data['open_price'],
+                volume=pc_data['volume'],
+                is_printed=pc_data['is_printed'],
+                event_time=dt.datetime.fromisoformat(pc_data['event_time']),
+                prev_volume=pc_data['prev_volume']
+            )
+            price_changes.append(pc)
+        
+        # Restore price_groups
+        price_groups.clear()
+        for symbol, pg_data in state_data['price_groups'].items():
+            pg = PriceGroup(
+                symbol=pg_data['symbol'],
+                tick_count=pg_data['tick_count'],
+                total_price_change=pg_data['total_price_change'],
+                relative_price_change=pg_data['relative_price_change'],
+                total_volume_change=pg_data['total_volume_change'],
+                last_price=pg_data['last_price'],
+                last_event_time=dt.datetime.fromisoformat(pg_data['last_event_time']),
+                open_price=pg_data['open_price'],
+                volume=pg_data['volume'],
+                is_printed=pg_data['is_printed']
+            )
+            price_groups[symbol] = pg
+        
+        # Restore other global variables
+        last_symbol = state_data.get('last_symbol', 'X')
+        show_only_pair = state_data.get('show_only_pair', 'USDT')
+        show_limit = state_data.get('show_limit', 1)
+        min_perc = state_data.get('min_perc', 0.05)
+        
+        logger.info(f"Successfully restored state: {len(price_changes)} price changes, {len(price_groups)} price groups")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to deserialize data: {e}")
+        return False
+
+def save_state():
+    """Save current state to file"""
+    try:
+        state_data = serialize_data()
+        if state_data:
+            with open(state_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+            logger.info(f"State saved to {state_file}")
+    except Exception as e:
+        logger.error(f"Failed to save state: {e}")
+
+def load_state():
+    """Load state from file if it exists and is valid"""
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                state_data = json.load(f)
+            
+            if deserialize_data(state_data):
+                logger.info("State restored successfully")
+                return True
+            else:
+                logger.info("State file discarded due to age or corruption")
+                return False
+        else:
+            logger.info("No state file found, starting fresh")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to load state: {e}")
+        return False
+
+def periodic_save():
+    """Periodic save function called every 10 minutes"""
+    global save_timer
+    save_state()
+    # Schedule next save in 10 minutes
+    save_timer = threading.Timer(600.0, periodic_save)
+    save_timer.daemon = True
+    save_timer.start()
 
 def send_notification_and_log(title, message):
     """Send notification via ntfy and log the message"""
@@ -227,8 +378,14 @@ def main():
     setup_logging()
     logger.info("BinancePump started")
     
+    # Load previous state if available
+    load_state()
+    
     # Setup ntfy
     setup_ntfy(args.ntfy)
+    
+    # Start periodic save timer (every 10 minutes)
+    periodic_save()
     
     #READ API CONFIG
     api_config = {}
@@ -245,6 +402,10 @@ def main():
     # Define our signal handler to set that event
     def handle_exit(signum, frame):
         print("\nShutting down…")
+        logger.info("Received shutdown signal, saving state...")
+        save_state()  # Save state before exit
+        if save_timer:
+            save_timer.cancel()  # Cancel periodic save timer
         stop_event.set()
         twm.stop()        # tells the Binance manager to stop
 
